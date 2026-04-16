@@ -520,7 +520,6 @@ final class RecentFilesViewController: NSViewController, NSTableViewDataSource, 
     private let scrollView = NSScrollView()
     private let contextMenu = NSMenu()
     private let openDownloadsButton = NSButton(title: "Downloads", target: nil, action: nil)
-    private let organizeButton = NSButton(title: "Organize", target: nil, action: nil)
 
     var files: [URL] = [] {
         didSet {
@@ -531,8 +530,6 @@ final class RecentFilesViewController: NSViewController, NSTableViewDataSource, 
     }
 
     var onOpenDownloads: (() -> Void)?
-    var onOrganizeNow: (() -> Void)?
-
     override func loadView() {
         view = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 360))
 
@@ -563,10 +560,7 @@ final class RecentFilesViewController: NSViewController, NSTableViewDataSource, 
         openDownloadsButton.target = self
         openDownloadsButton.action = #selector(openDownloads(_:))
 
-        organizeButton.target = self
-        organizeButton.action = #selector(organizeNow(_:))
-
-        let buttonRow = NSStackView(views: [openDownloadsButton, organizeButton])
+        let buttonRow = NSStackView(views: [openDownloadsButton])
         buttonRow.translatesAutoresizingMaskIntoConstraints = false
         buttonRow.orientation = .horizontal
         buttonRow.alignment = .centerY
@@ -646,10 +640,6 @@ final class RecentFilesViewController: NSViewController, NSTableViewDataSource, 
         onOpenDownloads?()
     }
 
-    @objc private func organizeNow(_ sender: Any?) {
-        onOrganizeNow?()
-    }
-
     @objc private func copyPathFromContext(_ sender: NSMenuItem) {
         guard let url = sender.representedObject as? URL else {
             return
@@ -725,9 +715,6 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
         popover.contentViewController = recentFilesViewController
         recentFilesViewController.onOpenDownloads = { [weak self] in
             self?.openDownloads(nil)
-        }
-        recentFilesViewController.onOrganizeNow = { [weak self] in
-            self?.organizeNow(nil)
         }
     }
 
@@ -829,10 +816,6 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
             return
         }
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-    }
-
-    @objc private func organizeNow(_ sender: Any?) {
-        scheduleOrganizerRun(after: 0, reason: "manual")
     }
 
     @objc private func openDownloads(_ sender: Any?) {
