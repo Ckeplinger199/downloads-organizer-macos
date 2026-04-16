@@ -1,0 +1,6 @@
+.DS_Store
+*.app
+*.dSYM
+*.swp
+*.tmp
+tmp/
