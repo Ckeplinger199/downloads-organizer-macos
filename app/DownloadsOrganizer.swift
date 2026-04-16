@@ -516,22 +516,29 @@ final class RecentFileCellView: NSTableCellView {
 }
 
 final class RecentFilesViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
+    private let searchField = NSSearchField()
     private let tableView = NSTableView()
     private let scrollView = NSScrollView()
     private let contextMenu = NSMenu()
     private let openDownloadsButton = NSButton(title: "Downloads", target: nil, action: nil)
+    private var filteredFiles: [URL] = []
 
     var files: [URL] = [] {
         didSet {
-            if isViewLoaded {
-                tableView.reloadData()
-            }
+            applyFilter()
         }
     }
 
     var onOpenDownloads: (() -> Void)?
     override func loadView() {
         view = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 360))
+
+        searchField.translatesAutoresizingMaskIntoConstraints = false
+        searchField.placeholderString = "Search recent files"
+        searchField.maximumRecents = 0
+        searchField.sendsSearchStringImmediately = true
+        searchField.target = self
+        searchField.action = #selector(searchChanged(_:))
 
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("RecentFilesColumn"))
         column.resizingMask = .autoresizingMask
@@ -566,11 +573,16 @@ final class RecentFilesViewController: NSViewController, NSTableViewDataSource, 
         buttonRow.alignment = .centerY
         buttonRow.spacing = 8
 
+        view.addSubview(searchField)
         view.addSubview(scrollView)
         view.addSubview(buttonRow)
 
         NSLayoutConstraint.activate([
-            scrollView.topAnchor.constraint(equalTo: view.topAnchor, constant: 10),
+            searchField.topAnchor.constraint(equalTo: view.topAnchor, constant: 10),
+            searchField.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 10),
+            searchField.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -10),
+
+            scrollView.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 10),
             scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 10),
             scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -10),
             scrollView.bottomAnchor.constraint(equalTo: buttonRow.topAnchor, constant: -10),
@@ -579,10 +591,12 @@ final class RecentFilesViewController: NSViewController, NSTableViewDataSource, 
             buttonRow.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -10),
             buttonRow.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -10)
         ])
+
+        applyFilter()
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int {
-        files.count
+        filteredFiles.count
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
@@ -592,21 +606,21 @@ final class RecentFilesViewController: NSViewController, NSTableViewDataSource, 
             view.identifier = identifier
             return view
         }()
-        cell.configure(with: files[row])
+        cell.configure(with: filteredFiles[row])
         return cell
     }
 
     func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> NSPasteboardWriting? {
-        files[row] as NSURL
+        filteredFiles[row] as NSURL
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
-        guard tableView.clickedRow >= 0, tableView.clickedRow < files.count else {
+        guard tableView.clickedRow >= 0, tableView.clickedRow < filteredFiles.count else {
             return
         }
 
-        let url = files[tableView.clickedRow]
+        let url = filteredFiles[tableView.clickedRow]
 
         let copyPath = NSMenuItem(title: "Copy Path", action: #selector(copyPathFromContext(_:)), keyEquivalent: "")
         copyPath.target = self
@@ -625,19 +639,23 @@ final class RecentFilesViewController: NSViewController, NSTableViewDataSource, 
     }
 
     @objc private func openSelectedRow(_ sender: Any?) {
-        guard tableView.clickedRow >= 0, tableView.clickedRow < files.count else {
+        guard tableView.clickedRow >= 0, tableView.clickedRow < filteredFiles.count else {
             let row = tableView.selectedRow
-            guard row >= 0, row < files.count else {
+            guard row >= 0, row < filteredFiles.count else {
                 return
             }
-            NSWorkspace.shared.open(files[row])
+            NSWorkspace.shared.open(filteredFiles[row])
             return
         }
-        NSWorkspace.shared.open(files[tableView.clickedRow])
+        NSWorkspace.shared.open(filteredFiles[tableView.clickedRow])
     }
 
     @objc private func openDownloads(_ sender: Any?) {
         onOpenDownloads?()
+    }
+
+    @objc private func searchChanged(_ sender: NSSearchField) {
+        applyFilter()
     }
 
     @objc private func copyPathFromContext(_ sender: NSMenuItem) {
@@ -659,6 +677,22 @@ final class RecentFilesViewController: NSViewController, NSTableViewDataSource, 
             return
         }
         NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    private func applyFilter() {
+        let query = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if query.isEmpty {
+            filteredFiles = files
+        } else {
+            filteredFiles = files.filter { url in
+                url.lastPathComponent.localizedCaseInsensitiveContains(query) ||
+                url.path.localizedCaseInsensitiveContains(query)
+            }
+        }
+        if isViewLoaded {
+            tableView.reloadData()
+            tableView.deselectAll(nil)
+        }
     }
 }
 

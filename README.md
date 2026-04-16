@@ -5,6 +5,7 @@ Small macOS menu bar file viewer for recent items in `~/Downloads`, with light b
 ## What It Does
 
 - Shows recent files from Downloads in a compact menu bar popover
+- Filters the recent-files list with a search box at the top of the popover
 - Supports dragging files out of the popover into Finder, Mail, Slack, and other apps
 - Keeps path-copy actions on right click instead of cluttering the main UI
 - Opens the Downloads folder from the popover
