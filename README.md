@@ -1,13 +1,14 @@
 # Downloads Organizer
 
-Small macOS menu bar utility that keeps `~/Downloads` organized and exposes a lightweight recent-files popover.
+Small macOS menu bar file viewer for recent items in `~/Downloads`, with light background sorting to keep common file types in stable folders.
 
 ## What It Does
 
-- Sorts new files in `~/Downloads` into stable folders such as `_PDF`, `_Images`, `_CSV`, and `_Docs/...`
 - Shows recent files from Downloads in a compact menu bar popover
 - Supports dragging files out of the popover into Finder, Mail, Slack, and other apps
 - Keeps path-copy actions on right click instead of cluttering the main UI
+- Opens the Downloads folder from the popover
+- In the background, sorts new files in `~/Downloads` into stable folders such as `_PDF`, `_Images`, `_CSV`, and `_Docs/...`
 
 ## Repo Layout
 
@@ -55,5 +56,5 @@ LAUNCH_AGENT_LABEL=io.github.downloadsorganizer \
 ## Notes
 
 - The app is menu-bar-only by design.
-- The organizer intentionally skips regular folders in the Downloads root; it organizes files and `.app` bundles.
+- The background sorter intentionally skips regular folders in the Downloads root; it only organizes files and `.app` bundles.
 - If macOS blocks Downloads access, grant the built app Full Disk Access and restart it.
