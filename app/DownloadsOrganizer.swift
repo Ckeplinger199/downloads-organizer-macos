@@ -29,9 +29,11 @@ struct Config {
 
     static let home = FileManager.default.homeDirectoryForCurrentUser
     static let downloads = home.appendingPathComponent("Downloads")
+    static let desktop = home.appendingPathComponent("Desktop")
     static let appSupport = home.appendingPathComponent("Library/Application Support/DownloadsOrganizer")
     static let statePath = appSupport.appendingPathComponent("state.json")
     static let lockPath = appSupport.appendingPathComponent("lock")
+    static let moveIndexPath = appSupport.appendingPathComponent("move-index.tsv")
     static let logDir = home.appendingPathComponent("Library/Logs/DownloadsOrganizer")
     static let logPath = logDir.appendingPathComponent("organize.log")
 }
@@ -65,6 +67,36 @@ func log(_ message: String) {
         }
     }
     print(message)
+}
+
+func tsvField(_ text: String) -> String {
+    text
+        .replacingOccurrences(of: "\t", with: " ")
+        .replacingOccurrences(of: "\r", with: " ")
+        .replacingOccurrences(of: "\n", with: " ")
+}
+
+func appendMoveIndex(timestamp: String, src: URL, movedTo: URL, typeLabel: String) {
+    let fields = [
+        timestamp,
+        src.lastPathComponent,
+        src.path,
+        movedTo.path,
+        typeLabel
+    ].map(tsvField)
+    let line = fields.joined(separator: "\t") + "\n"
+
+    guard let data = line.data(using: .utf8) else {
+        return
+    }
+
+    if let handle = try? FileHandle(forWritingTo: Config.moveIndexPath) {
+        handle.seekToEndOfFile()
+        handle.write(data)
+        try? handle.close()
+    } else {
+        try? data.write(to: Config.moveIndexPath)
+    }
 }
 
 func lockOwnerText() -> String? {
@@ -368,7 +400,11 @@ func organizeOnce(options: Options) -> Int32 {
             state.items.removeValue(forKey: src.path)
             movedCount += 1
             let prefix = options.dryRun ? "DRYRUN" : "MOVE"
+            let timestamp = ISO8601DateFormatter().string(from: Date())
             log("\(prefix): \(src.lastPathComponent) -> \(movedTo.path) | \(typeLabel)")
+            if !options.dryRun {
+                appendMoveIndex(timestamp: timestamp, src: src, movedTo: movedTo, typeLabel: typeLabel)
+            }
         } catch {
             log("ERROR: failed to move \(src.path) -> \(dest.path): \(error)")
         }
@@ -387,35 +423,22 @@ func organizeOnce(options: Options) -> Int32 {
 }
 
 func recentFiles(limit: Int) -> [URL] {
-    let fm = FileManager.default
     let keys: Set<URLResourceKey> = [
         .isDirectoryKey,
         .isHiddenKey,
-        .contentModificationDateKey
+        .contentModificationDateKey,
+        .contentTypeKey
     ]
 
-    guard let enumerator = fm.enumerator(
-        at: Config.downloads,
-        includingPropertiesForKeys: Array(keys),
-        options: [.skipsHiddenFiles, .skipsPackageDescendants]
-    ) else {
-        return []
+    var collected: [String: (URL, Date)] = [:]
+    collectRecentFiles(in: Config.downloads, keys: keys, into: &collected)
+
+    let screenshots = screenshotDirectory()
+    if !isPathWithinDirectory(screenshots, base: Config.downloads) {
+        collectScreenshots(in: screenshots, keys: keys, into: &collected)
     }
 
-    var collected: [(URL, Date)] = []
-    while let url = enumerator.nextObject() as? URL {
-        let values = try? url.resourceValues(forKeys: keys)
-        if values?.isDirectory == true {
-            continue
-        }
-        if values?.isHidden == true || url.lastPathComponent.hasPrefix(".") {
-            continue
-        }
-        let modifiedAt = values?.contentModificationDate ?? .distantPast
-        collected.append((url, modifiedAt))
-    }
-
-    return collected
+    return collected.values
         .sorted { lhs, rhs in
             if lhs.1 == rhs.1 {
                 return lhs.0.lastPathComponent.localizedCaseInsensitiveCompare(rhs.0.lastPathComponent) == .orderedAscending
@@ -438,7 +461,111 @@ func copyFileURLToPasteboard(_ url: URL) {
     pasteboard.writeObjects([url as NSURL])
 }
 
+func standardizedPath(_ url: URL) -> String {
+    url.standardizedFileURL.resolvingSymlinksInPath().path
+}
+
+func isPathWithinDirectory(_ candidate: URL, base: URL) -> Bool {
+    let candidatePath = standardizedPath(candidate)
+    let basePath = standardizedPath(base)
+    return candidatePath == basePath || candidatePath.hasPrefix(basePath + "/")
+}
+
+func screenshotDirectory() -> URL {
+    if let path = UserDefaults(suiteName: "com.apple.screencapture")?.string(forKey: "location")?
+        .trimmingCharacters(in: .whitespacesAndNewlines),
+       !path.isEmpty {
+        return URL(fileURLWithPath: (path as NSString).expandingTildeInPath, isDirectory: true)
+    }
+    return Config.desktop
+}
+
+func isScreenshotFile(url: URL, contentType: UTType?) -> Bool {
+    let name = url.deletingPathExtension().lastPathComponent.lowercased()
+    let ext = url.pathExtension.lowercased()
+    let looksLikeScreenshot = name.hasPrefix("screenshot ") || name.hasPrefix("screen shot ")
+    guard looksLikeScreenshot else {
+        return false
+    }
+    if contentType?.conforms(to: .image) == true || contentType?.conforms(to: .pdf) == true {
+        return true
+    }
+    return ["png", "jpg", "jpeg", "heic", "tif", "tiff", "pdf"].contains(ext)
+}
+
+func mergeRecentFile(_ url: URL, modifiedAt: Date, into collected: inout [String: (URL, Date)]) {
+    let key = standardizedPath(url)
+    guard collected[key] == nil || modifiedAt > collected[key]!.1 else {
+        return
+    }
+    collected[key] = (url, modifiedAt)
+}
+
+func collectFiles(
+    in base: URL,
+    keys: Set<URLResourceKey>,
+    recursive: Bool,
+    include: (URL, URLResourceValues) -> Bool,
+    into collected: inout [String: (URL, Date)]
+) {
+    let fm = FileManager.default
+    func collect(_ url: URL) {
+        guard let values = try? url.resourceValues(forKeys: keys) else {
+            return
+        }
+        if values.isDirectory == true {
+            return
+        }
+        if values.isHidden == true || url.lastPathComponent.hasPrefix(".") {
+            return
+        }
+        guard include(url, values) else {
+            return
+        }
+        let modifiedAt = values.contentModificationDate ?? .distantPast
+        mergeRecentFile(url, modifiedAt: modifiedAt, into: &collected)
+    }
+
+    if recursive {
+        guard let enumerator = fm.enumerator(
+            at: base,
+            includingPropertiesForKeys: Array(keys),
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else {
+            return
+        }
+        while let url = enumerator.nextObject() as? URL {
+            collect(url)
+        }
+        return
+    }
+
+    guard let entries = try? fm.contentsOfDirectory(at: base, includingPropertiesForKeys: Array(keys)) else {
+        return
+    }
+    for url in entries {
+        collect(url)
+    }
+}
+
+func collectRecentFiles(in base: URL, keys: Set<URLResourceKey>, into collected: inout [String: (URL, Date)]) {
+    collectFiles(in: base, keys: keys, recursive: true, include: { _, _ in true }, into: &collected)
+}
+
+func collectScreenshots(in base: URL, keys: Set<URLResourceKey>, into collected: inout [String: (URL, Date)]) {
+    collectFiles(
+        in: base,
+        keys: keys,
+        recursive: false,
+        include: { url, values in isScreenshotFile(url: url, contentType: values.contentType) },
+        into: &collected
+    )
+}
+
 func relativeFolderDescription(for url: URL) -> String {
+    if isScreenshotFile(url: url, contentType: nil) {
+        return "Screenshots"
+    }
     let folder = url.deletingLastPathComponent().path
     let base = Config.downloads.path
     if folder == base {
@@ -704,8 +831,10 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
 
     private var timer: Timer?
     private var directoryMonitor: DispatchSourceFileSystemObject?
+    private var screenshotMonitor: DispatchSourceFileSystemObject?
     private var pendingChangeWorkItem: DispatchWorkItem?
     private var pendingFollowupWorkItem: DispatchWorkItem?
+    private var pendingScreenshotRefreshWorkItem: DispatchWorkItem?
     private var lastRunDate: Date?
     private var lastExitCode: Int32 = 0
     private var recentFilesSnapshot: [URL] = []
@@ -724,7 +853,9 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
         timer?.invalidate()
         pendingChangeWorkItem?.cancel()
         pendingFollowupWorkItem?.cancel()
+        pendingScreenshotRefreshWorkItem?.cancel()
         directoryMonitor?.cancel()
+        screenshotMonitor?.cancel()
         popover.performClose(nil)
     }
 
@@ -761,9 +892,27 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
     }
 
     private func startDirectoryMonitor() {
-        let fd = Darwin.open(Config.downloads.path, O_EVTONLY)
+        directoryMonitor = makeDirectoryMonitor(at: Config.downloads) { [weak self] in
+            self?.scheduleChangeDrivenRuns()
+        }
+        directoryMonitor?.resume()
+
+        let screenshots = screenshotDirectory()
+        if !isPathWithinDirectory(screenshots, base: Config.downloads) {
+            screenshotMonitor = makeDirectoryMonitor(at: screenshots) { [weak self] in
+                self?.scheduleScreenshotRefresh()
+            }
+            screenshotMonitor?.resume()
+        }
+    }
+
+    private func makeDirectoryMonitor(
+        at directory: URL,
+        handler: @escaping () -> Void
+    ) -> DispatchSourceFileSystemObject? {
+        let fd = Darwin.open(directory.path, O_EVTONLY)
         guard fd >= 0 else {
-            return
+            return nil
         }
 
         let source = DispatchSource.makeFileSystemObjectSource(
@@ -771,14 +920,11 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
             eventMask: [.write, .rename, .delete, .attrib, .extend],
             queue: organizerQueue
         )
-        source.setEventHandler { [weak self] in
-            self?.scheduleChangeDrivenRuns()
-        }
+        source.setEventHandler(handler: handler)
         source.setCancelHandler {
             Darwin.close(fd)
         }
-        directoryMonitor = source
-        source.resume()
+        return source
     }
 
     private func scheduleChangeDrivenRuns() {
@@ -797,6 +943,17 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
 
         organizerQueue.asyncAfter(deadline: .now() + Config.changePassDelay, execute: first)
         organizerQueue.asyncAfter(deadline: .now() + Config.changeFollowupDelay, execute: second)
+    }
+
+    private func scheduleScreenshotRefresh() {
+        pendingScreenshotRefreshWorkItem?.cancel()
+
+        let refresh = DispatchWorkItem { [weak self] in
+            self?.refreshRecentFiles(reason: "screenshot-change")
+        }
+
+        pendingScreenshotRefreshWorkItem = refresh
+        organizerQueue.asyncAfter(deadline: .now() + Config.changePassDelay, execute: refresh)
     }
 
     private func scheduleOrganizerRun(after delay: TimeInterval, reason: String) {
