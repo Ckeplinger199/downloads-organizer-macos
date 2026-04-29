@@ -34,8 +34,6 @@ struct Config {
     static let statePath = appSupport.appendingPathComponent("state.json")
     static let lockPath = appSupport.appendingPathComponent("lock")
     static let moveIndexPath = appSupport.appendingPathComponent("move-index.tsv")
-    static let logDir = home.appendingPathComponent("Library/Logs/DownloadsOrganizer")
-    static let logPath = logDir.appendingPathComponent("organize.log")
 }
 
 struct Options {
@@ -51,21 +49,9 @@ var appController: MenuBarController?
 func ensureRuntimeDirs() {
     let fm = FileManager.default
     try? fm.createDirectory(at: Config.appSupport, withIntermediateDirectories: true)
-    try? fm.createDirectory(at: Config.logDir, withIntermediateDirectories: true)
 }
 
 func log(_ message: String) {
-    let ts = ISO8601DateFormatter().string(from: Date())
-    let line = "\(ts) \(message)\n"
-    if let data = line.data(using: .utf8) {
-        if let handle = try? FileHandle(forWritingTo: Config.logPath) {
-            handle.seekToEndOfFile()
-            handle.write(data)
-            try? handle.close()
-        } else {
-            try? data.write(to: Config.logPath)
-        }
-    }
     print(message)
 }
 
