@@ -15,9 +15,10 @@ Small macOS menu bar file viewer for recent items in `~/Downloads`, plus screens
 ## Repo Layout
 
 - `app/DownloadsOrganizer.swift`: app source
-- `scripts/build_app.sh`: builds a signed `.app` bundle in `~/Applications`
+- `scripts/build_app.sh`: builds a signed `.app` bundle in `~/Applications` and installs the resolver at `~/bin/downloads-resolve`
 - `scripts/install_launch_agent.sh`: installs a login LaunchAgent for the app
-- `scripts/resolve_download.sh`: resolves an original downloaded filename to its organized path
+- `scripts/downloads-resolve`: resolves an original downloaded filename or path to its organized path
+- `scripts/resolve_download.sh`: compatibility wrapper for `scripts/downloads-resolve`
 - `scripts/uninstall_launch_agent.sh`: removes the LaunchAgent cleanly
 
 ## Build
@@ -32,6 +33,7 @@ Optional overrides:
 APP_NAME=DownloadsOrganizer \
 BUNDLE_ID=io.github.downloadsorganizer \
 APP_PATH="$HOME/Applications/DownloadsOrganizer.app" \
+RESOLVER_INSTALL_PATH="$HOME/bin/downloads-resolve" \
 ./scripts/build_app.sh
 ```
 
@@ -58,16 +60,24 @@ LAUNCH_AGENT_LABEL=io.github.downloadsorganizer \
 
 ## Resolve Organized Downloads
 
-The app writes move records to:
+The app publishes a routing contract and move evidence to:
 
 ```text
+~/Downloads/.download-routing.json
+~/Downloads/.routing-ledger.jsonl
 ~/Library/Application Support/DownloadsOrganizer/move-index.tsv
 ```
 
-Resolve a moved file by its original downloaded name:
+Resolve a moved file by its original downloaded name or original `~/Downloads` path:
 
 ```bash
-./scripts/resolve_download.sh "example.pdf"
+./scripts/downloads-resolve "~/Downloads/example.pdf"
+```
+
+Use `--plain` when another script needs only the final path:
+
+```bash
+./scripts/downloads-resolve "example.pdf" --plain
 ```
 
 ## Notes

@@ -18,11 +18,37 @@ struct State: Codable {
     var items: [String: ItemState]
 }
 
+struct RoutingRule: Codable {
+    var id: String
+    var extensions: [String]
+    var destination: String
+    var note: String
+}
+
+struct RoutingManifest: Codable {
+    var version: Int
+    var downloadsRoot: String
+    var moveIndex: String
+    var moveLedger: String
+    var resolver: String
+    var missingPathRule: String
+    var rules: [RoutingRule]
+}
+
+struct MoveLedgerEntry: Codable {
+    var timestamp: String
+    var filename: String
+    var sourcePath: String
+    var destinationPath: String
+    var typeLabel: String
+}
+
 struct Config {
     static let inProgressSuffixes = [".download", ".crdownload", ".part"]
     static let inProgressExtensions = ["download", "crdownload", "part"]
     static let appName = "DownloadsOrganizer.app"
     static let recentFileLimit = 12
+    static let recentScreenshotReserve = 4
     static let timerInterval: TimeInterval = 60
     static let changePassDelay: TimeInterval = 2
     static let changeFollowupDelay: TimeInterval = 8
@@ -34,6 +60,9 @@ struct Config {
     static let statePath = appSupport.appendingPathComponent("state.json")
     static let lockPath = appSupport.appendingPathComponent("lock")
     static let moveIndexPath = appSupport.appendingPathComponent("move-index.tsv")
+    static let routingManifestPath = downloads.appendingPathComponent(".download-routing.json")
+    static let routingLedgerPath = downloads.appendingPathComponent(".routing-ledger.jsonl")
+    static let resolverPath = home.appendingPathComponent("bin/downloads-resolve")
 }
 
 struct Options {
@@ -41,6 +70,7 @@ struct Options {
     var fullSweep = false
     var minStableRuns = 1
     var once = false
+    var printRecents = false
 }
 
 var lockFileDescriptor: Int32 = -1
@@ -49,6 +79,7 @@ var appController: MenuBarController?
 func ensureRuntimeDirs() {
     let fm = FileManager.default
     try? fm.createDirectory(at: Config.appSupport, withIntermediateDirectories: true)
+    ensureRoutingManifest()
 }
 
 func log(_ message: String) {
@@ -82,6 +113,72 @@ func appendMoveIndex(timestamp: String, src: URL, movedTo: URL, typeLabel: Strin
         try? handle.close()
     } else {
         try? data.write(to: Config.moveIndexPath)
+    }
+}
+
+func routingManifest() -> RoutingManifest {
+    RoutingManifest(
+        version: 1,
+        downloadsRoot: Config.downloads.path,
+        moveIndex: Config.moveIndexPath.path,
+        moveLedger: Config.routingLedgerPath.path,
+        resolver: Config.resolverPath.path,
+        missingPathRule: "If a ~/Downloads path is missing, run the resolver before concluding the file is gone.",
+        rules: [
+            RoutingRule(id: "email", extensions: ["eml", "msg"], destination: "~/Downloads/_EML/{year}", note: "Mail exports are archived by message modification year."),
+            RoutingRule(id: "pdf", extensions: ["pdf"], destination: "~/Downloads/_PDF", note: "PDFs route to the front-door PDF folder."),
+            RoutingRule(id: "csv", extensions: ["csv"], destination: "~/Downloads/_CSV", note: "CSV exports route to the front-door CSV folder."),
+            RoutingRule(id: "spreadsheets", extensions: ["xlsx", "xls", "numbers"], destination: "~/Downloads/_Docs/Spreadsheets/Excel/{year}", note: "Workbook files retain a year partition."),
+            RoutingRule(id: "word", extensions: ["doc", "docx", "pages", "rtf", "odt"], destination: "~/Downloads/_Docs/Word/{year}", note: "Word-processing documents retain a year partition."),
+            RoutingRule(id: "presentations", extensions: ["ppt", "pptx", "key"], destination: "~/Downloads/_Docs/Presentations/{year}", note: "Presentation files retain a year partition."),
+            RoutingRule(id: "text", extensions: ["md", "txt", "log", "patch"], destination: "~/Downloads/_Docs/Text/{year}", note: "Text and patch files retain a year partition."),
+            RoutingRule(id: "web", extensions: ["html", "htm", "webloc"], destination: "~/Downloads/_Docs/Web/{year}", note: "Web documents retain a year partition."),
+            RoutingRule(id: "images", extensions: ["png", "jpg", "jpeg", "heic", "gif", "bmp", "tif", "tiff", "webp", "svg"], destination: "~/Downloads/_Images", note: "Images, including screenshots saved under Downloads, route to the image folder."),
+            RoutingRule(id: "audio", extensions: ["mp3", "wav", "m4a", "aac", "flac", "ogg", "aiff"], destination: "~/Downloads/_Audio", note: "Audio files route to the audio folder."),
+            RoutingRule(id: "video", extensions: ["mp4", "mov", "mkv", "avi", "wmv", "m4v", "webm"], destination: "~/Downloads/_Video", note: "Video files route to the video folder."),
+            RoutingRule(id: "installers", extensions: ["dmg", "pkg", "mpkg", "iso"], destination: "~/Downloads/_Installers", note: "Installers route to the installers folder."),
+            RoutingRule(id: "archives", extensions: ["zip", "tar", "gz", "tgz", "bz2", "xz", "7z", "rar"], destination: "~/Downloads/_Archives", note: "Archives route to the archives folder."),
+            RoutingRule(id: "apps", extensions: ["app"], destination: "~/Downloads/_Apps", note: "Application bundles route to the apps folder."),
+            RoutingRule(id: "code", extensions: ["py", "js", "ts", "json", "yaml", "yml", "toml", "ipynb", "sh", "gs", "swift"], destination: "~/Downloads/_Code", note: "Code and notebook files route to the code folder."),
+            RoutingRule(id: "fonts", extensions: ["ttf", "otf", "woff", "woff2"], destination: "~/Downloads/_Fonts", note: "Font files route to the fonts folder."),
+            RoutingRule(id: "binaries", extensions: [], destination: "~/Downloads/_Binaries", note: "Executable files detected by macOS content type route to the binaries folder."),
+            RoutingRule(id: "fallback", extensions: [], destination: "~/Downloads/_Other", note: "Unmatched files route to the fallback folder.")
+        ]
+    )
+}
+
+func ensureRoutingManifest() {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    guard let data = try? encoder.encode(routingManifest()) else {
+        return
+    }
+    if let existing = try? Data(contentsOf: Config.routingManifestPath), existing == data {
+        return
+    }
+    try? data.write(to: Config.routingManifestPath, options: .atomic)
+}
+
+func appendMoveLedger(timestamp: String, src: URL, movedTo: URL, typeLabel: String) {
+    let entry = MoveLedgerEntry(
+        timestamp: timestamp,
+        filename: src.lastPathComponent,
+        sourcePath: src.path,
+        destinationPath: movedTo.path,
+        typeLabel: typeLabel
+    )
+    let encoder = JSONEncoder()
+    guard var data = try? encoder.encode(entry) else {
+        return
+    }
+    data.append(0x0A)
+
+    if let handle = try? FileHandle(forWritingTo: Config.routingLedgerPath) {
+        handle.seekToEndOfFile()
+        handle.write(data)
+        try? handle.close()
+    } else {
+        try? data.write(to: Config.routingLedgerPath)
     }
 }
 
@@ -390,6 +487,7 @@ func organizeOnce(options: Options) -> Int32 {
             log("\(prefix): \(src.lastPathComponent) -> \(movedTo.path) | \(typeLabel)")
             if !options.dryRun {
                 appendMoveIndex(timestamp: timestamp, src: src, movedTo: movedTo, typeLabel: typeLabel)
+                appendMoveLedger(timestamp: timestamp, src: src, movedTo: movedTo, typeLabel: typeLabel)
             }
         } catch {
             log("ERROR: failed to move \(src.path) -> \(dest.path): \(error)")
@@ -424,14 +522,34 @@ func recentFiles(limit: Int) -> [URL] {
         collectScreenshots(in: screenshots, keys: keys, into: &collected)
     }
 
-    return collected.values
+    let sortedFiles = collected.values
         .sorted { lhs, rhs in
             if lhs.1 == rhs.1 {
                 return lhs.0.lastPathComponent.localizedCaseInsensitiveCompare(rhs.0.lastPathComponent) == .orderedAscending
             }
             return lhs.1 > rhs.1
         }
-        .prefix(limit)
+
+    let pinnedScreenshots = sortedFiles
+        .filter { isScreenshotFile(url: $0.0, contentType: nil) }
+        .prefix(Config.recentScreenshotReserve)
+
+    var selected: [String: (URL, Date)] = [:]
+    for item in pinnedScreenshots {
+        selected[standardizedPath(item.0)] = item
+    }
+
+    for item in sortedFiles where selected.count < limit {
+        selected[standardizedPath(item.0)] = item
+    }
+
+    return selected.values
+        .sorted { lhs, rhs in
+            if lhs.1 == rhs.1 {
+                return lhs.0.lastPathComponent.localizedCaseInsensitiveCompare(rhs.0.lastPathComponent) == .orderedAscending
+            }
+            return lhs.1 > rhs.1
+        }
         .map { $0.0 }
 }
 
@@ -1018,6 +1136,8 @@ func parseOptions() -> Options {
             }
         case "--once":
             options.once = true
+        case "--print-recents":
+            options.printRecents = true
         default:
             break
         }
@@ -1027,6 +1147,13 @@ func parseOptions() -> Options {
 }
 
 let options = parseOptions()
+if options.printRecents {
+    ensureRuntimeDirs()
+    for url in recentFiles(limit: Config.recentFileLimit) {
+        print(url.path)
+    }
+    exit(0)
+}
 if CommandLine.arguments.count > 1 || options.once {
     exit(organizeOnce(options: options))
 }

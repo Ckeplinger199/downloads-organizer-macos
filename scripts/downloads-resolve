@@ -1,0 +1,250 @@
+#!/usr/bin/env python3
+import argparse
+import datetime as dt
+import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+from typing import Optional
+
+
+HOME = Path.home()
+DOWNLOADS = HOME / "Downloads"
+MANIFEST = DOWNLOADS / ".download-routing.json"
+MOVE_INDEX = HOME / "Library/Application Support/DownloadsOrganizer/move-index.tsv"
+MOVE_LEDGER = DOWNLOADS / ".routing-ledger.jsonl"
+
+
+FALLBACK_RULES = [
+    {"id": "email", "extensions": ["eml", "msg"], "destination": "~/Downloads/_EML/{year}"},
+    {"id": "pdf", "extensions": ["pdf"], "destination": "~/Downloads/_PDF"},
+    {"id": "csv", "extensions": ["csv"], "destination": "~/Downloads/_CSV"},
+    {"id": "spreadsheets", "extensions": ["xlsx", "xls", "numbers"], "destination": "~/Downloads/_Docs/Spreadsheets/Excel/{year}"},
+    {"id": "word", "extensions": ["doc", "docx", "pages", "rtf", "odt"], "destination": "~/Downloads/_Docs/Word/{year}"},
+    {"id": "presentations", "extensions": ["ppt", "pptx", "key"], "destination": "~/Downloads/_Docs/Presentations/{year}"},
+    {"id": "text", "extensions": ["md", "txt", "log", "patch"], "destination": "~/Downloads/_Docs/Text/{year}"},
+    {"id": "web", "extensions": ["html", "htm", "webloc"], "destination": "~/Downloads/_Docs/Web/{year}"},
+    {"id": "images", "extensions": ["png", "jpg", "jpeg", "heic", "gif", "bmp", "tif", "tiff", "webp", "svg"], "destination": "~/Downloads/_Images"},
+    {"id": "audio", "extensions": ["mp3", "wav", "m4a", "aac", "flac", "ogg", "aiff"], "destination": "~/Downloads/_Audio"},
+    {"id": "video", "extensions": ["mp4", "mov", "mkv", "avi", "wmv", "m4v", "webm"], "destination": "~/Downloads/_Video"},
+    {"id": "installers", "extensions": ["dmg", "pkg", "mpkg", "iso"], "destination": "~/Downloads/_Installers"},
+    {"id": "archives", "extensions": ["zip", "tar", "gz", "tgz", "bz2", "xz", "7z", "rar"], "destination": "~/Downloads/_Archives"},
+    {"id": "apps", "extensions": ["app"], "destination": "~/Downloads/_Apps"},
+    {"id": "code", "extensions": ["py", "js", "ts", "json", "yaml", "yml", "toml", "ipynb", "sh", "gs", "swift"], "destination": "~/Downloads/_Code"},
+    {"id": "fonts", "extensions": ["ttf", "otf", "woff", "woff2"], "destination": "~/Downloads/_Fonts"},
+    {"id": "binaries", "extensions": [], "destination": "~/Downloads/_Binaries"},
+    {"id": "fallback", "extensions": [], "destination": "~/Downloads/_Other"},
+]
+
+
+def expand(path: str) -> Path:
+    return Path(os.path.expanduser(path)).resolve()
+
+
+def load_manifest() -> dict:
+    if MANIFEST.exists():
+        try:
+            return json.loads(MANIFEST.read_text())
+        except Exception:
+            pass
+    return {
+        "version": 0,
+        "downloadsRoot": str(DOWNLOADS),
+        "moveIndex": str(MOVE_INDEX),
+        "moveLedger": str(MOVE_LEDGER),
+        "rules": FALLBACK_RULES,
+    }
+
+
+def known_years() -> list[str]:
+    years = {str(dt.datetime.now().year)}
+    for base in [DOWNLOADS / "_EML", DOWNLOADS / "_Docs"]:
+        if not base.exists():
+            continue
+        for path in base.rglob("*"):
+            if path.is_dir() and path.name.isdigit() and len(path.name) == 4:
+                years.add(path.name)
+    return sorted(years, reverse=True)
+
+
+def rule_for_extension(rules: list[dict], ext: str) -> Optional[dict]:
+    ext = ext.lower().lstrip(".")
+    fallback = None
+    for rule in rules:
+        if rule.get("id") == "fallback":
+            fallback = rule
+            continue
+        if ext in [item.lower().lstrip(".") for item in rule.get("extensions", [])]:
+            return rule
+    return fallback
+
+
+def candidate_dirs(rule: Optional[dict]) -> list[Path]:
+    if not rule:
+        return []
+    destination = rule.get("destination", "")
+    if "{year}" not in destination:
+        return [expand(destination)]
+    return [expand(destination.replace("{year}", year)) for year in known_years()]
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def add_candidate(candidates: list[dict], path: Path, matched_by: str, evidence: Optional[dict] = None) -> None:
+    try:
+        resolved = path.resolve()
+    except Exception:
+        resolved = path
+    candidates.append({
+        "path": str(resolved),
+        "exists": resolved.exists(),
+        "matched_by": matched_by,
+        "evidence": evidence or {},
+    })
+
+
+def ledger_candidates(query: str, basename: str) -> list[dict]:
+    matches = []
+    if not MOVE_LEDGER.exists():
+        return matches
+    with MOVE_LEDGER.open("r", errors="replace") as handle:
+        for line in handle:
+            try:
+                entry = json.loads(line)
+            except Exception:
+                continue
+            source = entry.get("sourcePath", "")
+            dest = entry.get("destinationPath", "")
+            filename = entry.get("filename", "")
+            if query in {source, dest} or basename in {filename, Path(source).name, Path(dest).name}:
+                matches.append({
+                    "path": dest,
+                    "exists": Path(dest).exists(),
+                    "matched_by": "routing-ledger",
+                    "evidence": entry,
+                })
+    return matches[-20:]
+
+
+def move_index_candidates(query: str, basename: str) -> list[dict]:
+    matches = []
+    if not MOVE_INDEX.exists():
+        return matches
+    with MOVE_INDEX.open("r", errors="replace") as handle:
+        for line in handle:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) < 4:
+                continue
+            timestamp, filename, source, dest = parts[:4]
+            type_label = parts[4] if len(parts) > 4 else ""
+            if query in {source, dest} or basename in {filename, Path(source).name, Path(dest).name}:
+                matches.append({
+                    "path": dest,
+                    "exists": Path(dest).exists(),
+                    "matched_by": "move-index",
+                    "evidence": {
+                        "timestamp": timestamp,
+                        "filename": filename,
+                        "sourcePath": source,
+                        "destinationPath": dest,
+                        "typeLabel": type_label,
+                    },
+                })
+    return matches[-20:]
+
+
+def nearby_candidates(basename: str, rule: Optional[dict]) -> list[dict]:
+    matches = []
+    for directory in candidate_dirs(rule):
+        candidate = directory / basename
+        add_candidate(matches, candidate, "manifest-rule", {"rule": rule.get("id") if rule else None})
+        if candidate.exists():
+            continue
+        stem = candidate.stem
+        suffix = candidate.suffix
+        for sibling in directory.glob(f"{stem}__mv*{suffix}") if directory.exists() else []:
+            add_candidate(matches, sibling, "manifest-collision-name", {"rule": rule.get("id") if rule else None})
+    return matches
+
+
+def walk_candidates(basename: str, limit: int) -> list[dict]:
+    matches = []
+    for root, dirs, files in os.walk(DOWNLOADS):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        if basename in files:
+            add_candidate(matches, Path(root) / basename, "downloads-walk")
+            if len(matches) >= limit:
+                break
+    return matches
+
+
+def choose(candidates: list[dict]) -> Optional[dict]:
+    existing = [item for item in candidates if item["exists"]]
+    if not existing:
+        return None
+    priority = {
+        "exact": 0,
+        "routing-ledger": 1,
+        "move-index": 2,
+        "manifest-rule": 3,
+        "manifest-collision-name": 4,
+        "downloads-walk": 5,
+    }
+    existing.sort(key=lambda item: (priority.get(item["matched_by"], 99), item["path"]))
+    return existing[0]
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Resolve files moved by DownloadsOrganizer.")
+    parser.add_argument("query", help="Original ~/Downloads path or filename to resolve")
+    parser.add_argument("--plain", action="store_true", help="Print only the resolved path when found")
+    parser.add_argument("--sha256", action="store_true", help="Include SHA-256 for the resolved file")
+    parser.add_argument("--walk-limit", type=int, default=25, help="Maximum fallback filename matches")
+    args = parser.parse_args()
+
+    manifest = load_manifest()
+    query_path = expand(args.query)
+    basename = Path(args.query).name
+    ext = Path(basename).suffix.lower().lstrip(".")
+    rule = rule_for_extension(manifest.get("rules", []), ext)
+
+    candidates = []
+    add_candidate(candidates, query_path, "exact")
+    candidates.extend(ledger_candidates(str(query_path), basename))
+    candidates.extend(move_index_candidates(str(query_path), basename))
+    candidates.extend(nearby_candidates(basename, rule))
+    if not any(item["exists"] for item in candidates):
+        candidates.extend(walk_candidates(basename, args.walk_limit))
+
+    resolved = choose(candidates)
+    result = {
+        "query": args.query,
+        "status": "found" if resolved else "missing",
+        "resolvedPath": resolved["path"] if resolved else None,
+        "matchedBy": resolved["matched_by"] if resolved else None,
+        "rule": rule.get("id") if rule else None,
+        "manifest": str(MANIFEST),
+        "checked": candidates,
+    }
+    if resolved and args.sha256:
+        result["sha256"] = sha256(Path(resolved["path"]))
+
+    if args.plain:
+        if resolved:
+            print(resolved["path"])
+            return 0
+        return 1
+
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0 if resolved else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
